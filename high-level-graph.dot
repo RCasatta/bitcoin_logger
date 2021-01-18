@@ -1,0 +1,43 @@
+digraph G {
+  subgraph cluster_logger {
+    label = "bitcoin-logger";
+    style=filled;
+    color=lightgrey;
+    node [style=filled,color=white];
+
+    store
+    zmq_reader
+    flush
+    rpc_call
+    zmq_reader -> store
+    rpc_call -> store
+    store -> flush
+  }
+
+  subgraph cluster_bitcoind {
+    label = "bitcoind";
+    style=filled;
+    color=lightgrey;
+    node [style=filled,color=white];
+    zmq;
+    rpc;
+  }
+
+  subgraph cluster_csv {
+    label = "bitcoin-csv";
+    style=filled;
+    color=lightgrey;
+    node [style=filled,color=white];
+    raw_logs_reader
+    csv_writer
+  }
+
+  raw_logs [shape=Square];
+  csv [shape=Square];
+  zmq -> zmq_reader [ label="rawtx, rawblock, sequence" ]
+  store -> rpc [ label="missing data" ]
+  rpc_call -> rpc [ label="estimatesmartfee" ]
+  flush -> raw_logs
+  raw_logs -> raw_logs_reader
+  csv_writer -> csv
+}
