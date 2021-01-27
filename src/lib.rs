@@ -97,6 +97,11 @@ pub struct CsvOptions {
     ///  if fee_rate(tx) < q01 # matches the 1% txs of the block with lower fee rate
     #[structopt(long, default_value = "1,30,45,55,70,99")]
     pub percentiles: String,
+
+    /// Compute mempool buckets with weights instead of number of txs, to be compatible with
+    /// electrum mempool stats https://github.com/Blockstream/esplora/blob/master/API.md#get-mempool
+    #[structopt(long)]
+    pub mempool_weight: bool,
 }
 
 #[derive(StructOpt, Debug)]

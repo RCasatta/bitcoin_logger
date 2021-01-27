@@ -3,7 +3,9 @@ use bitcoin::hashes::core::fmt::Formatter;
 use bitcoin::{Block, OutPoint, Transaction, Txid};
 use bitcoin_logger::flush::{parse_sequence, BitcoinLog, Sequence};
 use bitcoin_logger::rpc::Fee;
-use bitcoin_logger::store::{read_log, EventType, HashHeight, MempoolBuckets, Transactions};
+use bitcoin_logger::store::{
+    read_log, EventType, HashHeight, MempoolBuckets, MempoolWeightBuckets, Transactions,
+};
 use bitcoin_logger::CsvOptions;
 use bitcoin_logger::Result;
 use flate2::{Compression, GzBuilder};
@@ -185,7 +187,8 @@ impl RowWithoutConfirm {
         current_height: u32,
         fee_rate: f64,
         fee_rate_bytes: f64,
-        mempool: &MempoolBuckets,
+        mempool_buckets: String,
+        mempool_len: usize,
     ) -> Self {
         RowWithoutConfirm {
             txid,
@@ -193,8 +196,8 @@ impl RowWithoutConfirm {
             current_height,
             fee_rate: format!("{:.2}", fee_rate),
             fee_rate_bytes: format!("{:.2}", fee_rate_bytes),
-            mempool_buckets: mempool.buckets_str(),
-            mempool_len: mempool.len(),
+            mempool_buckets,
+            mempool_len,
         }
     }
 }
@@ -284,6 +287,10 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
     let mut count_input_not_confirmed = 0;
     let mut counter_block_to_confirm: BTreeMap<u32, u32> = BTreeMap::new();
     let mut mempool = MempoolBuckets::new(
+        options.buckets_increment as u32,
+        options.buckets_limit as f64,
+    );
+    let mut mempool_w = MempoolWeightBuckets::new(
         options.buckets_increment as u32,
         options.buckets_limit as f64,
     );
@@ -468,11 +475,12 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                                         continue;
                                     }
                                 };
+                            mempool_w.add(txid, fee_rate, tx.get_weight() as u64);
 
                             let input_confirmed_last_x = input_confirmed_heights.iter().all(|i| {
-                                *i <= current_height
-                                    && *i
-                                        > current_height.saturating_sub(options.blocks_to_consider)
+                                let limit =
+                                    current_height.saturating_sub(options.blocks_to_consider);
+                                *i <= current_height && *i > limit
                             });
                             if input_confirmed_last_x {
                                 // light client will download only the last X blocks,
@@ -481,13 +489,20 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                             }
                             // but I can use every seen tx as train data
 
+                            let (mempool_len, mempool_buckets) = if options.mempool_weight {
+                                (mempool_w.len(), mempool_w.buckets_str())
+                            } else {
+                                (mempool.len(), mempool.buckets_str())
+                            };
+
                             let row = RowWithoutConfirm::new(
                                 txid,
                                 event.0,
                                 current_height,
                                 fee_rate,
                                 fee_rate_bytes,
-                                &mempool,
+                                mempool_buckets,
+                                mempool_len,
                             );
 
                             let confirms_at = match txs.height(&txid) {
@@ -580,6 +595,11 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                     for txid in raw_mempool {
                         if let Some(fee_rate) = txs.fee_rate(&txid) {
                             mempool.add(txid, fee_rate);
+                            mempool_w.add(
+                                txid,
+                                fee_rate,
+                                txs.get(&txid).unwrap().get_weight() as u64,
+                            );
                         }
                     }
                 }
