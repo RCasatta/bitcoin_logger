@@ -36,7 +36,9 @@ pub fn start(
                 let client = options.node_config.make_rpc_client()?;
                 for block in BLOCKS.iter() {
                     let fee = client.estimate_smart_fee(*block, Some(*mode))?;
-                    vec.push(Fee(fee.blocks as u16, fee.fee_rate.unwrap().as_sat()));
+                    if let Some(fee_rate) = fee.fee_rate {
+                        vec.push(Fee(fee.blocks as u16, fee_rate.as_sat()));
+                    }
                 }
                 let data_type = match mode {
                     EstimateMode::Conservative => EventType::EstimateSmartFeesConservative,
