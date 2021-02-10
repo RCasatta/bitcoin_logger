@@ -90,6 +90,8 @@ struct SortedBlockFees {
     pub fees: Vec<f64>,
     pub mean: Option<f64>,
     pub percentiles_csv: String,
+    pub percentiles: Vec<f64>,
+    pub percentiles_tresh: Vec<u8>,
 }
 
 impl SortedBlockFees {
@@ -102,11 +104,24 @@ impl SortedBlockFees {
             let len = fees.len();
             Some(sum / len as f64)
         };
-        let percentiles_csv = perc_csv.percentile_csv(&fees);
+        let percentiles_tresh = perc_csv.thresholds.clone();
+        let (percentiles, percentiles_csv) = perc_csv.percentile_csv(&fees);
         SortedBlockFees {
             fees,
             mean,
             percentiles_csv,
+            percentiles,
+            percentiles_tresh,
+        }
+    }
+
+    pub fn exclude(&self, confirms_in: u32, fee_rate: f64) -> bool {
+        //"1,30,45,55,70,99"
+        match confirms_in {
+            1 => fee_rate < self.percentiles[2] || fee_rate > self.percentiles[3],
+            2 => fee_rate < self.percentiles[1] || fee_rate > self.percentiles[4],
+            3 => fee_rate < self.percentiles[0] || fee_rate > self.percentiles[5],
+            _ => false,
         }
     }
 }
@@ -155,29 +170,21 @@ impl PercentileCSV {
             last,
         }
     }
-    fn head(&self) -> String {
-        let mut result = String::new();
-        for t in self.thresholds.iter() {
-            result.push_str(&format!("q{}", t));
-            if t != &self.last {
-                result.push(',');
-            }
-        }
-        result
-    }
-    fn percentile_csv(&self, fees: &[f64]) -> String {
+    fn percentile_csv(&self, fees: &[f64]) -> (Vec<f64>, String) {
         if fees.is_empty() {
-            return self.empty.clone();
+            return (vec![], self.empty.clone());
         }
         let mut result = String::new();
+        let mut result_val = vec![];
         for t in self.thresholds.iter() {
             let perc = percentile(&fees, *t).unwrap();
+            result_val.push(perc);
             result.push_str(&format!("{:.2}", perc));
             if t != &self.last {
                 result.push(',');
             }
         }
-        result
+        (result_val, result)
     }
 }
 
@@ -206,12 +213,7 @@ impl RowWithoutConfirm {
 }
 
 impl RowWithoutConfirm {
-    fn head(
-        buckets: usize,
-        perc_csv: &PercentileCSV,
-        blocks_buckets: usize,
-        use_mempool: bool,
-    ) -> String {
+    fn head(buckets: usize, blocks_buckets: usize, use_mempool: bool) -> String {
         let buckets_str: Vec<_> = (0..buckets).map(|i| format!("a{}", i)).collect();
         let blocks_buckets_str: Vec<_> = (0..blocks_buckets).map(|i| format!("b{}", i)).collect();
         let buckets = if use_mempool {
@@ -219,7 +221,7 @@ impl RowWithoutConfirm {
         } else {
             blocks_buckets_str
         };
-        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,block_avg_fee,core_econ,core_cons,mempool_len,parent_in_cpfp,{},{}\n", perc_csv.head(), buckets.join(","))
+        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,core_econ,core_cons,mempool_len,parent_in_cpfp,{}\n", buckets.join(","))
     }
 
     fn print(
@@ -227,7 +229,6 @@ impl RowWithoutConfirm {
         confirms_at: u32,
         econ: Option<f64>,
         cons: Option<f64>,
-        block_fees: &SortedBlockFees,
         parent_in_cpfp: bool,
         use_mempool: bool,
     ) -> String {
@@ -243,15 +244,12 @@ impl RowWithoutConfirm {
         out.push(',');
         out.push_str(&self.fee_rate_bytes);
         out.push(',');
-        out.push_str(&unwrap_or_na(block_fees.mean.as_ref(), true));
         out.push_str(&unwrap_or_na(econ.as_ref(), true));
         out.push_str(&unwrap_or_na(cons.as_ref(), true));
 
         out.push_str(&self.mempool_len.to_string());
         out.push(',');
         out.push_str(&(parent_in_cpfp as u8).to_string());
-        out.push(',');
-        out.push_str(&block_fees.percentiles_csv);
         out.push(',');
         if use_mempool {
             out.push_str(&self.mempool_buckets);
@@ -324,7 +322,6 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
     gz.write_all(
         RowWithoutConfirm::head(
             mempool.number_of_buckets(),
-            &perc_csv,
             blocks_bucket.number_of_buckets(),
             options.use_mempool,
         )
@@ -417,19 +414,18 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                 let block_fees = blocks_fees.get(&confirms_at).unwrap(); // safe, just checked
 
                 let confirms_in = confirms_at - conf.current_height;
+
+                if block_fees.exclude(confirms_in, conf.fee_rate.parse::<f64>().unwrap()) {
+                    // exclude rows when confirmations = 1,2,3 with percentiles
+                    continue;
+                }
+
                 *counter_block_to_confirm.entry(confirms_in).or_default() += 1;
                 let spent_in_block = spent_in_blocks.get(&confirms_at).unwrap();
                 let parent_in_cpfp = has_output_spent_in_block(tx, spent_in_block);
                 gz.write_all(
-                    conf.print(
-                        confirms_at,
-                        None,
-                        None,
-                        block_fees,
-                        parent_in_cpfp,
-                        options.use_mempool,
-                    )
-                    .as_bytes(),
+                    conf.print(confirms_at, None, None, parent_in_cpfp, options.use_mempool)
+                        .as_bytes(),
                 )?;
             }
             not_yet_confirmed.retain(|e| !now_confirmed_with_block_fees.contains(&e));
@@ -561,6 +557,12 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                             };
 
                             let confirms_in = confirms_at - current_height;
+
+                            if block_fees.exclude(confirms_in, fee_rate) {
+                                // exclude rows when confirmations = 1,2,3 with percentiles
+                                continue;
+                            }
+
                             *counter_block_to_confirm.entry(confirms_in).or_default() += 1;
 
                             let core_fee_rate_economical = last_estimate_economical
@@ -576,7 +578,6 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                                     confirms_at,
                                     core_fee_rate_economical,
                                     core_fee_rate_conservative,
-                                    block_fees,
                                     parent_in_cpfp,
                                     options.use_mempool,
                                 )

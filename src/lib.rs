@@ -109,6 +109,10 @@ pub struct CsvOptions {
 
     #[structopt(long, default_value = "10")]
     pub blocks_buckets_to_consider: usize,
+
+    /// filter percentile rows
+    #[structopt(long)]
+    pub filter_rows: bool,
 }
 
 #[derive(StructOpt, Debug)]
