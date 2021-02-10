@@ -1,11 +1,11 @@
-use std::collections::{VecDeque, HashMap};
-use bitcoin::Block;
-use log::debug;
 use crate::buckets::create_buckets_limits;
 use crate::store::Transactions;
+use bitcoin::Block;
+use log::debug;
+use std::collections::{HashMap, VecDeque};
 
 pub struct BlocksBuckets {
-    last_blocks: VecDeque<Block>,  //TODO may use (height, block) and check last 10
+    last_blocks: VecDeque<Block>, //TODO may use (height, block) and check last 10
     buckets: Option<String>,
     buckets_na: String,
     buckets_limits: Vec<f64>,
@@ -15,7 +15,7 @@ pub struct BlocksBuckets {
 impl BlocksBuckets {
     pub fn new(increment_percent: u32, upper_limit: f64, blocks_to_consider: usize) -> Self {
         let buckets_limits = create_buckets_limits(increment_percent, upper_limit);
-        let buckets_na: Vec<_> =buckets_limits.iter().map(|_| "?").collect();
+        let buckets_na: Vec<_> = buckets_limits.iter().map(|_| "?").collect();
         Self {
             last_blocks: VecDeque::new(),
             buckets: None,
@@ -53,7 +53,7 @@ impl BlocksBuckets {
                     .unwrap_or(self.buckets_limits.len() - 1);
                 buckets[index] += 1;
             }
-            let buckets_str: Vec<_> = buckets.iter().map(|e|  e.to_string()).collect();
+            let buckets_str: Vec<_> = buckets.iter().map(|e| e.to_string()).collect();
             self.buckets = Some(buckets_str.join(","));
         }
     }

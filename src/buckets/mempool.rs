@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use bitcoin::Txid;
-use std::iter::FromIterator;
 use crate::buckets::create_buckets_limits;
+use bitcoin::Txid;
+use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
 
 pub struct MempoolWeightBuckets {
     /// contain the total weight for this bucket
@@ -150,17 +150,16 @@ impl MempoolWeightBuckets {
         HashSet::from_iter(self.tx_bucket.keys())
     }
 }
-fn create_buckets(increment_percent: u32, upper_limit: f64) -> (Vec<f64>,Vec<u64>) {
+fn create_buckets(increment_percent: u32, upper_limit: f64) -> (Vec<f64>, Vec<u64>) {
     let buckets_limits = create_buckets_limits(increment_percent, upper_limit);
     let buckets = vec![0u64; buckets_limits.len()];
     (buckets_limits, buckets)
 }
 
-
 #[cfg(test)]
 mod tests {
-    use bitcoin::Txid;
     use crate::buckets::mempool::MempoolBuckets;
+    use bitcoin::Txid;
 
     #[test]
     fn test_mempool() {
@@ -177,5 +176,4 @@ mod tests {
         assert_eq!(mempool.len(), 0);
         assert_eq!(mempool.buckets_str(), "0,0,0,0,0,0,0,0,0,0,0,0,0");
     }
-
 }

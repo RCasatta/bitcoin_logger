@@ -6,7 +6,7 @@ use bitcoincore_rpc::RpcApi;
 use flate2::bufread::DeflateDecoder;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -145,7 +145,9 @@ impl Transactions {
             txs_output_values.insert(*txid, output_values.into_boxed_slice());
         }
         Transactions {
-            txs, txs_output_values, txs_height: HashMap::new(),
+            txs,
+            txs_output_values,
+            txs_height: HashMap::new(),
         }
     }
 

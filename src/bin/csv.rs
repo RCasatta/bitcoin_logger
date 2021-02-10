@@ -1,11 +1,11 @@
 use bitcoin::consensus::deserialize;
 use bitcoin::hashes::core::fmt::Formatter;
 use bitcoin::{Block, OutPoint, Transaction, Txid};
+use bitcoin_logger::buckets::blocks::BlocksBuckets;
+use bitcoin_logger::buckets::mempool::{MempoolBuckets, MempoolWeightBuckets};
 use bitcoin_logger::flush::{parse_sequence, BitcoinLog, Sequence};
 use bitcoin_logger::rpc::Fee;
-use bitcoin_logger::store::{
-    read_log, EventType, HashHeight, Transactions,
-};
+use bitcoin_logger::store::{read_log, EventType, HashHeight, Transactions};
 use bitcoin_logger::CsvOptions;
 use bitcoin_logger::Result;
 use flate2::{Compression, GzBuilder};
@@ -19,8 +19,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, sync_channel, Receiver};
 use std::{fmt, fs, thread};
 use structopt::StructOpt;
-use bitcoin_logger::buckets::mempool::{MempoolBuckets, MempoolWeightBuckets};
-use bitcoin_logger::buckets::blocks::BlocksBuckets;
 
 fn main() -> Result<()> {
     env_logger::init_from_env(
@@ -208,10 +206,20 @@ impl RowWithoutConfirm {
 }
 
 impl RowWithoutConfirm {
-    fn head(buckets: usize, perc_csv: &PercentileCSV, blocks_buckets: usize) -> String {
+    fn head(
+        buckets: usize,
+        perc_csv: &PercentileCSV,
+        blocks_buckets: usize,
+        use_mempool: bool,
+    ) -> String {
         let buckets_str: Vec<_> = (0..buckets).map(|i| format!("a{}", i)).collect();
         let blocks_buckets_str: Vec<_> = (0..blocks_buckets).map(|i| format!("b{}", i)).collect();
-        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,block_avg_fee,core_econ,core_cons,mempool_len,parent_in_cpfp,{},{},{}\n", perc_csv.head(), buckets_str.join(","), blocks_buckets_str.join(","))
+        let buckets = if use_mempool {
+            buckets_str
+        } else {
+            blocks_buckets_str
+        };
+        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,block_avg_fee,core_econ,core_cons,mempool_len,parent_in_cpfp,{},{}\n", perc_csv.head(), buckets.join(","))
     }
 
     fn print(
@@ -221,6 +229,7 @@ impl RowWithoutConfirm {
         cons: Option<f64>,
         block_fees: &SortedBlockFees,
         parent_in_cpfp: bool,
+        use_mempool: bool,
     ) -> String {
         let mut out = String::new();
 
@@ -244,9 +253,11 @@ impl RowWithoutConfirm {
         out.push(',');
         out.push_str(&block_fees.percentiles_csv);
         out.push(',');
-        out.push_str(&self.mempool_buckets);
-        out.push(',');
-        out.push_str(&self.blocks_buckets);
+        if use_mempool {
+            out.push_str(&self.mempool_buckets);
+        } else {
+            out.push_str(&self.blocks_buckets);
+        }
         out.push('\n');
         out
     }
@@ -305,12 +316,20 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
     let mut blocks_bucket = BlocksBuckets::new(
         options.buckets_increment as u32,
         options.buckets_limit as f64,
-        3,
+        options.blocks_buckets_to_consider,
     );
     let mut last_ts = 0;
     let mut blocks_fees: HashMap<_, _> = HashMap::new();
     let perc_csv = PercentileCSV::from_str(&options.percentiles);
-    gz.write_all(RowWithoutConfirm::head(mempool.number_of_buckets(), &perc_csv, blocks_bucket.number_of_buckets() ).as_bytes())?;
+    gz.write_all(
+        RowWithoutConfirm::head(
+            mempool.number_of_buckets(),
+            &perc_csv,
+            blocks_bucket.number_of_buckets(),
+            options.use_mempool,
+        )
+        .as_bytes(),
+    )?;
     info!("mempool buckets {}", mempool.number_of_buckets());
     let mut not_yet_confirmed: Vec<RowWithoutConfirm> = vec![]; //TODO should remove very old elements from here (tx that never confirms)
     while let Some(log) = receiver.recv()? {
@@ -402,8 +421,15 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                 let spent_in_block = spent_in_blocks.get(&confirms_at).unwrap();
                 let parent_in_cpfp = has_output_spent_in_block(tx, spent_in_block);
                 gz.write_all(
-                    conf.print(confirms_at, None, None, block_fees, parent_in_cpfp)
-                        .as_bytes(),
+                    conf.print(
+                        confirms_at,
+                        None,
+                        None,
+                        block_fees,
+                        parent_in_cpfp,
+                        options.use_mempool,
+                    )
+                    .as_bytes(),
                 )?;
             }
             not_yet_confirmed.retain(|e| !now_confirmed_with_block_fees.contains(&e));
@@ -552,6 +578,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                                     core_fee_rate_conservative,
                                     block_fees,
                                     parent_in_cpfp,
+                                    options.use_mempool,
                                 )
                                 .as_bytes(),
                             )?;
