@@ -6,10 +6,9 @@ use bitcoincore_rpc::RpcApi;
 use flate2::bufread::DeflateDecoder;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::fs::File;
 use std::io::BufReader;
-use std::iter::FromIterator;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -139,6 +138,17 @@ impl From<TxidOutputValues> for OutputValues {
 }
 
 impl Transactions {
+    pub fn from_txs(txs: HashMap<Txid, Transaction>) -> Self {
+        let mut txs_output_values: HashMap<Txid, OutputValues> = HashMap::new();
+        for (txid, tx) in txs.iter() {
+            let output_values: Vec<_> = tx.output.iter().map(|e| e.value).collect();
+            txs_output_values.insert(*txid, output_values.into_boxed_slice());
+        }
+        Transactions {
+            txs, txs_output_values, txs_height: HashMap::new(),
+        }
+    }
+
     pub fn new(data: Data) -> Self {
         let mut txs = HashMap::new();
         let txs_output_values: HashMap<_, _> = data
@@ -194,6 +204,10 @@ impl Transactions {
         Some((fee as f64) / (tx.get_weight() as f64 / 4.0))
     }
 
+    pub fn fee_rates(&self) -> Vec<f64> {
+        self.txs.keys().filter_map(|tx| self.fee_rate(tx)).collect()
+    }
+
     // fee rate in sat/bytes
     pub fn fee_rate_bytes(&self, txid: &Txid) -> Option<f64> {
         let tx = self.txs.get(txid)?;
@@ -210,169 +224,6 @@ impl Transactions {
         }
         Some(sum_inputs - sum_outputs)
     }
-}
-
-pub struct MempoolWeightBuckets {
-    /// contain the total weight for this bucket
-    buckets_weights: Vec<u64>,
-    /// contain the fee rate limits for every bucket ith
-    buckets_limits: Vec<f64>,
-    /// in which bucket the Txid is in
-    tx_bucket: HashMap<Txid, TxBucket>,
-}
-
-pub struct TxBucket {
-    index: usize,
-    weight: u64,
-}
-
-pub struct MempoolBuckets {
-    /// contain the number of elements for bucket ith
-    buckets: Vec<u64>,
-    /// contain the fee rate limits for every bucket ith
-    buckets_limits: Vec<f64>,
-    /// in which bucket the Txid is in
-    tx_bucket: HashMap<Txid, usize>,
-}
-
-impl MempoolBuckets {
-    pub fn new(increment_percent: u32, upper_limit: f64) -> Self {
-        let (buckets_limits, buckets) = create_buckets(increment_percent, upper_limit);
-
-        MempoolBuckets {
-            buckets,
-            buckets_limits,
-            tx_bucket: HashMap::new(),
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.tx_bucket.clear();
-        for el in self.buckets.iter_mut() {
-            *el = 0;
-        }
-    }
-
-    pub fn add(&mut self, txid: Txid, rate: f64) {
-        if rate > 1.0 && self.tx_bucket.get(&txid).is_none() {
-            // TODO MempoolBuckets use array of indexes to avoid many comparisons?
-            let index = self
-                .buckets_limits
-                .iter()
-                .position(|e| e > &rate)
-                .unwrap_or(self.buckets_limits.len() - 1);
-            self.buckets[index] += 1;
-            self.tx_bucket.insert(txid, index);
-        }
-    }
-
-    pub fn remove(&mut self, txid: &Txid) {
-        if let Some(index) = self.tx_bucket.remove(txid) {
-            self.buckets[index] -= 1;
-        }
-    }
-
-    pub fn number_of_buckets(&self) -> usize {
-        self.buckets.len()
-    }
-
-    pub fn buckets_str(&self) -> String {
-        self.buckets
-            .iter()
-            .map(|e| e.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
-    pub fn len(&self) -> usize {
-        self.tx_bucket.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tx_bucket.is_empty()
-    }
-
-    pub fn txids_set(&self) -> HashSet<&Txid> {
-        HashSet::from_iter(self.tx_bucket.keys())
-    }
-}
-
-impl MempoolWeightBuckets {
-    pub fn new(increment_percent: u32, upper_limit: f64) -> Self {
-        let (buckets_limits, buckets_weights) = create_buckets(increment_percent, upper_limit);
-
-        MempoolWeightBuckets {
-            buckets_weights,
-            buckets_limits,
-            tx_bucket: HashMap::new(),
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.tx_bucket.clear();
-        for el in self.buckets_weights.iter_mut() {
-            *el = 0;
-        }
-    }
-
-    pub fn add(&mut self, txid: Txid, rate: f64, weight: u64) {
-        if rate > 1.0 && self.tx_bucket.get(&txid).is_none() {
-            // TODO MempoolBuckets use array of indexes to avoid many comparisons?
-            let index = self
-                .buckets_limits
-                .iter()
-                .position(|e| e > &rate)
-                .unwrap_or(self.buckets_limits.len() - 1);
-            self.buckets_weights[index] += weight;
-            self.tx_bucket.insert(txid, TxBucket { index, weight });
-        }
-    }
-
-    pub fn remove(&mut self, txid: &Txid) {
-        if let Some(bucket) = self.tx_bucket.remove(txid) {
-            self.buckets_weights[bucket.index] -= bucket.weight;
-        }
-    }
-
-    pub fn number_of_buckets(&self) -> usize {
-        self.buckets_weights.len()
-    }
-
-    /// returns vbytes
-    pub fn buckets_str(&self) -> String {
-        self.buckets_weights
-            .iter()
-            .map(|e| (e / 4).to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
-    pub fn len(&self) -> usize {
-        self.tx_bucket.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tx_bucket.is_empty()
-    }
-
-    pub fn txids_set(&self) -> HashSet<&Txid> {
-        HashSet::from_iter(self.tx_bucket.keys())
-    }
-}
-
-fn create_buckets(increment_percent: u32, upper_limit: f64) -> (Vec<f64>, Vec<u64>) {
-    let mut buckets_limits = vec![];
-    let increment_percent = 1.0f64 + (increment_percent as f64 / 100.0f64);
-    let mut current_value = 1.0f64;
-    loop {
-        if current_value >= upper_limit {
-            break;
-        }
-        current_value *= increment_percent;
-        buckets_limits.push(current_value);
-    }
-    let buckets = vec![0u64; buckets_limits.len()];
-    (buckets_limits, buckets)
 }
 
 pub fn read_log(file: &PathBuf) -> Result<BitcoinLog> {
@@ -393,32 +244,4 @@ pub fn read_log(file: &PathBuf) -> Result<BitcoinLog> {
     info!("data.blocks: {:?}", log.data.blocks.len());
     info!("events: {:?}", log.events.len());
     Ok(log)
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::store::{now, MempoolBuckets};
-    use bitcoin::Txid;
-
-    #[test]
-    fn test_mempool() {
-        let mut mempool = MempoolBuckets::new(20, 10.0);
-        let txid = Txid::default();
-        mempool.add(txid, 5.0);
-        assert_eq!(mempool.len(), 1);
-        assert_eq!(mempool.number_of_buckets(), 13);
-        assert_eq!(mempool.buckets_str(), "0,0,0,0,0,0,0,0,1,0,0,0,0");
-        mempool.remove(&txid);
-        assert_eq!(mempool.len(), 0);
-        assert_eq!(mempool.buckets_str(), "0,0,0,0,0,0,0,0,0,0,0,0,0");
-        mempool.remove(&txid);
-        assert_eq!(mempool.len(), 0);
-        assert_eq!(mempool.buckets_str(), "0,0,0,0,0,0,0,0,0,0,0,0,0");
-    }
-
-    #[test]
-    fn test_millis() {
-        let now = now();
-        assert_eq!(now.leading_zeros(), 23);
-    }
 }
