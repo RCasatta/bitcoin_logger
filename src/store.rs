@@ -116,7 +116,7 @@ pub fn get_hash_height_event(options: &LoggerOptions) -> Result<EventOrData> {
     ))
 }
 
-/// returns current time in millis since the epoch, truncation to u64 should be save for a while,
+/// returns current time in millis since the epoch, truncation to u64 should be safe for a while,
 /// result has 23 leading zeros as 2020
 pub fn now() -> u64 {
     SystemTime::now()

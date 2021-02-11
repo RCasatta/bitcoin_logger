@@ -19,8 +19,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, sync_channel, Receiver};
 use std::{fmt, fs, thread};
 use structopt::StructOpt;
+use std::time::Instant;
 
 fn main() -> Result<()> {
+    let now = Instant::now();
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
@@ -70,6 +72,7 @@ fn main() -> Result<()> {
 
     h1.join().unwrap();
     h2.join().unwrap();
+    info!("Time elapsed: {:?}", now.elapsed());
 
     Ok(())
 }
@@ -84,6 +87,7 @@ struct RowWithoutConfirm {
     mempool_buckets: String,
     mempool_len: usize,
     blocks_buckets: String,
+    last_block_ts: Option<u32>,
 }
 
 struct SortedBlockFees {
@@ -198,6 +202,7 @@ impl RowWithoutConfirm {
         mempool_buckets: String,
         mempool_len: usize,
         blocks_buckets: String,
+        last_block_ts: Option<u32>,
     ) -> Self {
         RowWithoutConfirm {
             txid,
@@ -208,6 +213,7 @@ impl RowWithoutConfirm {
             mempool_buckets,
             mempool_len,
             blocks_buckets,
+            last_block_ts,
         }
     }
 }
@@ -221,7 +227,7 @@ impl RowWithoutConfirm {
         } else {
             blocks_buckets_str
         };
-        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,core_econ,core_cons,mempool_len,parent_in_cpfp,{}\n", buckets.join(","))
+        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,core_econ,core_cons,mempool_len,parent_in_cpfp,last_block_ts,{}\n", buckets.join(","))
     }
 
     fn print(
@@ -250,6 +256,12 @@ impl RowWithoutConfirm {
         out.push_str(&self.mempool_len.to_string());
         out.push(',');
         out.push_str(&(parent_in_cpfp as u8).to_string());
+        out.push(',');
+        out.push_str(
+            &self
+                .last_block_ts.map(|n| n.to_string())
+                .unwrap_or("?".to_string()),
+        );
         out.push(',');
         if use_mempool {
             out.push_str(&self.mempool_buckets);
@@ -539,6 +551,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                                 mempool_buckets,
                                 mempool_len,
                                 blocks_bucket.get_buckets().to_string(),
+                                blocks_bucket.last_non_empty_ts(),
                             );
 
                             let confirms_at = match txs.height(&txid) {
