@@ -2,6 +2,7 @@ use crate::buckets::create_buckets_limits;
 use crate::store::Transactions;
 use bitcoin::Block;
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU32;
 
 #[derive(Debug)]
 pub struct BlocksBuckets {
@@ -27,15 +28,6 @@ impl BlocksBuckets {
 
     fn full(&self) -> bool {
         self.blocks_to_consider == self.last_blocks.len()
-    }
-
-    pub fn last_non_empty_ts(&self) -> Option<u32> {
-        for b in self.last_blocks.iter().rev() {
-            if b.txdata.len() > 1 {
-                return Some(b.header.time);
-            }
-        }
-        return None;
     }
 
     pub fn add(&mut self, block: Block) {
@@ -81,35 +73,58 @@ impl BlocksBuckets {
     }
 }
 
+pub struct BlocksTimes(HashMap<u32, Option<NonZeroU32>>); //height, block time if non empty
+
+impl BlocksTimes {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+    pub fn add(&mut self, height: u32, block: &Block) {
+        let val = if block.txdata.len() > 1 {
+            NonZeroU32::new(block.header.time)
+        } else {
+            None
+        };
+        self.0.insert(height, val);
+    }
+
+    /// returns block time if available, if not check previous height up to 10
+    pub fn time(&self, height: u32) -> u32 {
+        let min = height.saturating_sub(10);
+        for i in (min..=height).rev() {
+            if let Some(Some(val)) = self.0.get(&i) {
+                return val.get();
+            }
+        }
+        0
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use crate::buckets::blocks::BlocksTimes;
     use bitcoin::blockdata::constants::genesis_block;
-    use bitcoin::{Network, Transaction};
-    use crate::buckets::blocks::BlocksBuckets;
-    use bitcoin::consensus::deserialize;
-    use bitcoin::hashes::hex::FromHex;
-    use crate::store::now;
+    use bitcoin::Network;
 
     #[test]
-    fn test_block_buckets() {
+    fn test_block_times() {
+        let mut bt = BlocksTimes::new();
+        assert_eq!(bt.time(0), 0, "giving time even if there aren't");
         let b1 = genesis_block(Network::Bitcoin);
+        bt.add(1, &b1);
+        assert_eq!(bt.time(1), 0, "considering empty block");
         let mut b2 = b1.clone();
-
-        assert_eq!(1231006505, b1.header.time);
-        let mut bb = BlocksBuckets::new(50,100.0,1);
-        bb.add(b1);
-        assert_eq!(bb.last_non_empty_ts(), None, "empty blocks is being considered");
-
-        let bytes = Vec::<u8>::from_hex("0200000001aad73931018bd25f84ae400b68848be09db706eac2ac18298babee71ab656f8b0000000048473044022058f6fc7c6a33e1b31548d481c826c015bd30135aad42cd67790dab66d2ad243b02204a1ced2604c6735b6393e5b41691dd78b00f0c5942fb9f751856faa938157dba01feffffff0280f0fa020000000017a9140fb9463421696b82c833af241c78c17ddbde493487d0f20a270100000017a91429ca74f8a08f81999428185c97b5d852e4063f618765000000").unwrap();
-        let tx1: Transaction = deserialize(&bytes).unwrap();
-        b2.txdata.push(tx1);
-        let mut b3 = b2.clone();
-        bb.add(b2);
-        assert_eq!(bb.last_non_empty_ts(), Some(1231006505000));
-        let now = now() as u32 / 1000;
-        b3.header.time= now;
-        bb.add(b3);
-        assert_eq!(bb.last_non_empty_ts(), Some(now as u64 * 1000u64));
+        b2.txdata.push(b1.txdata[0].clone());
+        b2.header.time = 2;
+        bt.add(2, &b2);
+        assert_eq!(bt.time(2), 2, "getting wrong time");
+        let mut b3 = b1.clone();
+        b3.header.time = 3;
+        bt.add(3, &b3);
+        assert_eq!(bt.time(3), 2, "getting wrong time because last is empty");
+        let mut b4 = b2.clone();
+        b4.header.time = 4;
+        bt.add(4, &b4);
+        assert_eq!(bt.time(4), 4, "getting non last time");
     }
 }

@@ -1,7 +1,7 @@
 use bitcoin::consensus::deserialize;
 use bitcoin::hashes::core::fmt::Formatter;
 use bitcoin::{Block, OutPoint, Transaction, Txid};
-use bitcoin_logger::buckets::blocks::BlocksBuckets;
+use bitcoin_logger::buckets::blocks::{BlocksBuckets, BlocksTimes};
 use bitcoin_logger::buckets::mempool::{MempoolBuckets, MempoolWeightBuckets};
 use bitcoin_logger::flush::{parse_sequence, BitcoinLog, Sequence};
 use bitcoin_logger::rpc::Fee;
@@ -9,7 +9,7 @@ use bitcoin_logger::store::{read_log, EventType, HashHeight, Transactions};
 use bitcoin_logger::CsvOptions;
 use bitcoin_logger::Result;
 use flate2::{Compression, GzBuilder};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::fs::File;
@@ -17,9 +17,9 @@ use std::io::Write;
 use std::iter::FromIterator;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, sync_channel, Receiver};
+use std::time::Instant;
 use std::{fmt, fs, thread};
 use structopt::StructOpt;
-use std::time::Instant;
 
 fn main() -> Result<()> {
     let now = Instant::now();
@@ -87,7 +87,7 @@ struct RowWithoutConfirm {
     mempool_buckets: String,
     mempool_len: usize,
     blocks_buckets: String,
-    last_block_ts: Option<u32>,
+    last_block_ts: u32,
 }
 
 struct SortedBlockFees {
@@ -202,7 +202,7 @@ impl RowWithoutConfirm {
         mempool_buckets: String,
         mempool_len: usize,
         blocks_buckets: String,
-        last_block_ts: Option<u32>,
+        last_block_ts: u32,
     ) -> Self {
         RowWithoutConfirm {
             txid,
@@ -257,12 +257,9 @@ impl RowWithoutConfirm {
         out.push(',');
         out.push_str(&(parent_in_cpfp as u8).to_string());
         out.push(',');
-        out.push_str(
-            &self
-                .last_block_ts.map(|n| n.to_string())
-                .unwrap_or("?".to_string()),
-        );
+        out.push_str(&self.last_block_ts.to_string());
         out.push(',');
+
         if use_mempool {
             out.push_str(&self.mempool_buckets);
         } else {
@@ -328,6 +325,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
         options.buckets_limit as f64,
         options.blocks_buckets_to_consider,
     );
+    let mut blocks_times = BlocksTimes::new();
     let mut last_ts = 0;
     let mut blocks_fees: HashMap<_, _> = HashMap::new();
     let perc_csv = PercentileCSV::from_str(&options.percentiles);
@@ -372,7 +370,9 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                 warn!("blocks_height for {} is none, probably stale", hash);
                 continue;
             }
+
             let h = *blocks_height.get(hash).unwrap();
+            blocks_times.add(h, block);
             let prevouts: HashSet<_> = block
                 .txdata
                 .iter()
@@ -551,7 +551,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                                 mempool_buckets,
                                 mempool_len,
                                 blocks_bucket.get_buckets().to_string(),
-                                blocks_bucket.last_non_empty_ts(),
+                                blocks_times.time(current_height),
                             );
 
                             let confirms_at = match txs.height(&txid) {
@@ -643,7 +643,8 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                     let only_mine: HashSet<_> =
                         my_mempool_set.difference(&raw_mempool_set).collect();
                     if !only_mine.is_empty() {
-                        warn!("only mine: {:?}", only_mine);
+                        warn!("only mine total tx: {:?}", only_mine.len());
+                        trace!("only mine tx: {:?}", only_mine);
                     }
                 }
                 EventType::InitialRawMempool => {
@@ -669,7 +670,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
         info!("{} blocks", block_found);
         info!("-----------------------")
     }
-    info!("counter_block_to_confirm {:?}", counter_block_to_confirm);
+    debug!("counter_block_to_confirm {:?}", counter_block_to_confirm);
     info!("count_input_not_confirmed {}", count_input_not_confirmed);
     info!("total {}", total_rows);
     Ok(())
