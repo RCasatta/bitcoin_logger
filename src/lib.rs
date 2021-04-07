@@ -2,6 +2,7 @@ use bitcoincore_rpc::{Auth, Client};
 use std::path::PathBuf;
 use structopt::StructOpt;
 
+pub mod buckets;
 pub mod flush;
 pub mod rpc;
 pub mod store;
@@ -102,6 +103,16 @@ pub struct CsvOptions {
     /// electrum mempool stats https://github.com/Blockstream/esplora/blob/master/API.md#get-mempool
     #[structopt(long)]
     pub mempool_weight: bool,
+
+    #[structopt(long)]
+    pub use_mempool: bool,
+
+    #[structopt(long, default_value = "10")]
+    pub blocks_buckets_to_consider: usize,
+
+    /// filter percentile rows
+    #[structopt(long)]
+    pub filter_rows: bool,
 }
 
 #[derive(StructOpt, Debug)]

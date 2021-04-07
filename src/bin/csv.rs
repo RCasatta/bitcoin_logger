@@ -1,15 +1,15 @@
 use bitcoin::consensus::deserialize;
 use bitcoin::hashes::core::fmt::Formatter;
 use bitcoin::{Block, OutPoint, Transaction, Txid};
+use bitcoin_logger::buckets::blocks::{BlocksBuckets, BlocksTimes};
+use bitcoin_logger::buckets::mempool::{MempoolBuckets, MempoolWeightBuckets};
 use bitcoin_logger::flush::{parse_sequence, BitcoinLog, Sequence};
 use bitcoin_logger::rpc::Fee;
-use bitcoin_logger::store::{
-    read_log, EventType, HashHeight, MempoolBuckets, MempoolWeightBuckets, Transactions,
-};
+use bitcoin_logger::store::{read_log, EventType, HashHeight, Transactions};
 use bitcoin_logger::CsvOptions;
 use bitcoin_logger::Result;
 use flate2::{Compression, GzBuilder};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::fs::File;
@@ -17,10 +17,12 @@ use std::io::Write;
 use std::iter::FromIterator;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, sync_channel, Receiver};
+use std::time::Instant;
 use std::{fmt, fs, thread};
 use structopt::StructOpt;
 
 fn main() -> Result<()> {
+    let now = Instant::now();
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
@@ -70,6 +72,7 @@ fn main() -> Result<()> {
 
     h1.join().unwrap();
     h2.join().unwrap();
+    info!("Time elapsed: {:?}", now.elapsed());
 
     Ok(())
 }
@@ -83,12 +86,16 @@ struct RowWithoutConfirm {
     fee_rate_bytes: String, // formatted f64 so that struct can derive Eq, PartialEq, Hash
     mempool_buckets: String,
     mempool_len: usize,
+    blocks_buckets: String,
+    last_block_ts: u32,
 }
 
 struct SortedBlockFees {
     pub fees: Vec<f64>,
     pub mean: Option<f64>,
     pub percentiles_csv: String,
+    pub percentiles: Vec<f64>,
+    pub percentiles_tresh: Vec<u8>,
 }
 
 impl SortedBlockFees {
@@ -101,11 +108,24 @@ impl SortedBlockFees {
             let len = fees.len();
             Some(sum / len as f64)
         };
-        let percentiles_csv = perc_csv.percentile_csv(&fees);
+        let percentiles_tresh = perc_csv.thresholds.clone();
+        let (percentiles, percentiles_csv) = perc_csv.percentile_csv(&fees);
         SortedBlockFees {
             fees,
             mean,
             percentiles_csv,
+            percentiles,
+            percentiles_tresh,
+        }
+    }
+
+    pub fn exclude(&self, confirms_in: u32, fee_rate: f64) -> bool {
+        //"1,30,45,55,70,99"
+        match confirms_in {
+            1 => fee_rate < self.percentiles[2] || fee_rate > self.percentiles[3],
+            2 => fee_rate < self.percentiles[1] || fee_rate > self.percentiles[4],
+            3 => fee_rate < self.percentiles[0] || fee_rate > self.percentiles[5],
+            _ => false,
         }
     }
 }
@@ -154,29 +174,21 @@ impl PercentileCSV {
             last,
         }
     }
-    fn head(&self) -> String {
-        let mut result = String::new();
-        for t in self.thresholds.iter() {
-            result.push_str(&format!("q{}", t));
-            if t != &self.last {
-                result.push(',');
-            }
-        }
-        result
-    }
-    fn percentile_csv(&self, fees: &[f64]) -> String {
+    fn percentile_csv(&self, fees: &[f64]) -> (Vec<f64>, String) {
         if fees.is_empty() {
-            return self.empty.clone();
+            return (vec![], self.empty.clone());
         }
         let mut result = String::new();
+        let mut result_val = vec![];
         for t in self.thresholds.iter() {
             let perc = percentile(&fees, *t).unwrap();
+            result_val.push(perc);
             result.push_str(&format!("{:.2}", perc));
             if t != &self.last {
                 result.push(',');
             }
         }
-        result
+        (result_val, result)
     }
 }
 
@@ -189,6 +201,8 @@ impl RowWithoutConfirm {
         fee_rate_bytes: f64,
         mempool_buckets: String,
         mempool_len: usize,
+        blocks_buckets: String,
+        last_block_ts: u32,
     ) -> Self {
         RowWithoutConfirm {
             txid,
@@ -198,14 +212,22 @@ impl RowWithoutConfirm {
             fee_rate_bytes: format!("{:.2}", fee_rate_bytes),
             mempool_buckets,
             mempool_len,
+            blocks_buckets,
+            last_block_ts,
         }
     }
 }
 
 impl RowWithoutConfirm {
-    fn head(buckets: usize, perc_csv: &PercentileCSV) -> String {
+    fn head(buckets: usize, blocks_buckets: usize, use_mempool: bool) -> String {
         let buckets_str: Vec<_> = (0..buckets).map(|i| format!("a{}", i)).collect();
-        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,block_avg_fee,core_econ,core_cons,mempool_len,parent_in_cpfp,{},{}\n", perc_csv.head(), buckets_str.join(","))
+        let blocks_buckets_str: Vec<_> = (0..blocks_buckets).map(|i| format!("b{}", i)).collect();
+        let buckets = if use_mempool {
+            buckets_str
+        } else {
+            blocks_buckets_str
+        };
+        format!("txid,timestamp,current_height,confirms_in,fee_rate,fee_rate_bytes,core_econ,core_cons,mempool_len,parent_in_cpfp,last_block_ts,{}\n", buckets.join(","))
     }
 
     fn print(
@@ -213,8 +235,8 @@ impl RowWithoutConfirm {
         confirms_at: u32,
         econ: Option<f64>,
         cons: Option<f64>,
-        block_fees: &SortedBlockFees,
         parent_in_cpfp: bool,
+        use_mempool: bool,
     ) -> String {
         let mut out = String::new();
 
@@ -228,7 +250,6 @@ impl RowWithoutConfirm {
         out.push(',');
         out.push_str(&self.fee_rate_bytes);
         out.push(',');
-        out.push_str(&unwrap_or_na(block_fees.mean.as_ref(), true));
         out.push_str(&unwrap_or_na(econ.as_ref(), true));
         out.push_str(&unwrap_or_na(cons.as_ref(), true));
 
@@ -236,9 +257,14 @@ impl RowWithoutConfirm {
         out.push(',');
         out.push_str(&(parent_in_cpfp as u8).to_string());
         out.push(',');
-        out.push_str(&block_fees.percentiles_csv);
+        out.push_str(&self.last_block_ts.to_string());
         out.push(',');
-        out.push_str(&self.mempool_buckets);
+
+        if use_mempool {
+            out.push_str(&self.mempool_buckets);
+        } else {
+            out.push_str(&self.blocks_buckets);
+        }
         out.push('\n');
         out
     }
@@ -294,10 +320,23 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
         options.buckets_increment as u32,
         options.buckets_limit as f64,
     );
+    let mut blocks_bucket = BlocksBuckets::new(
+        options.buckets_increment as u32,
+        options.buckets_limit as f64,
+        options.blocks_buckets_to_consider,
+    );
+    let mut blocks_times = BlocksTimes::new();
     let mut last_ts = 0;
     let mut blocks_fees: HashMap<_, _> = HashMap::new();
     let perc_csv = PercentileCSV::from_str(&options.percentiles);
-    gz.write_all(RowWithoutConfirm::head(mempool.number_of_buckets(), &perc_csv).as_bytes())?;
+    gz.write_all(
+        RowWithoutConfirm::head(
+            mempool.number_of_buckets(),
+            blocks_bucket.number_of_buckets(),
+            options.use_mempool,
+        )
+        .as_bytes(),
+    )?;
     info!("mempool buckets {}", mempool.number_of_buckets());
     let mut not_yet_confirmed: Vec<RowWithoutConfirm> = vec![]; //TODO should remove very old elements from here (tx that never confirms)
     while let Some(log) = receiver.recv()? {
@@ -324,14 +363,17 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
 
         let mut blocks_height: HashMap<_, _> =
             data.blocks_height.iter().map(|e| (e.0, e.1)).collect();
-        let txs = Transactions::new(data);
+        let mut txs_map = HashMap::new();
+        let txs = Transactions::new(&data, &mut txs_map);
 
         for (hash, block) in blocks.iter() {
             if blocks_height.get(hash).is_none() {
                 warn!("blocks_height for {} is none, probably stale", hash);
                 continue;
             }
+
             let h = *blocks_height.get(hash).unwrap();
+            blocks_times.add(h, block);
             let prevouts: HashSet<_> = block
                 .txdata
                 .iter()
@@ -385,11 +427,17 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                 let block_fees = blocks_fees.get(&confirms_at).unwrap(); // safe, just checked
 
                 let confirms_in = confirms_at - conf.current_height;
+
+                if block_fees.exclude(confirms_in, conf.fee_rate.parse::<f64>().unwrap()) {
+                    // exclude rows when confirmations = 1,2,3 with percentiles
+                    continue;
+                }
+
                 *counter_block_to_confirm.entry(confirms_in).or_default() += 1;
                 let spent_in_block = spent_in_blocks.get(&confirms_at).unwrap();
                 let parent_in_cpfp = has_output_spent_in_block(tx, spent_in_block);
                 gz.write_all(
-                    conf.print(confirms_at, None, None, block_fees, parent_in_cpfp)
+                    conf.print(confirms_at, None, None, parent_in_cpfp, options.use_mempool)
                         .as_bytes(),
                 )?;
             }
@@ -503,6 +551,8 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                                 fee_rate_bytes,
                                 mempool_buckets,
                                 mempool_len,
+                                blocks_bucket.get_buckets().to_string(),
+                                blocks_times.time(current_height),
                             );
 
                             let confirms_at = match txs.height(&txid) {
@@ -521,6 +571,12 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                             };
 
                             let confirms_in = confirms_at - current_height;
+
+                            if block_fees.exclude(confirms_in, fee_rate) {
+                                // exclude rows when confirmations = 1,2,3 with percentiles
+                                continue;
+                            }
+
                             *counter_block_to_confirm.entry(confirms_in).or_default() += 1;
 
                             let core_fee_rate_economical = last_estimate_economical
@@ -536,8 +592,8 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                                     confirms_at,
                                     core_fee_rate_economical,
                                     core_fee_rate_conservative,
-                                    block_fees,
                                     parent_in_cpfp,
+                                    options.use_mempool,
                                 )
                                 .as_bytes(),
                             )?;
@@ -553,6 +609,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                         let block = blocks.get(&block_hash).unwrap_or_else(|| {
                             panic!("missing {}, need to be corrected", block_hash)
                         });
+                        blocks_bucket.add(block.clone());
                         for tx in block.txdata.iter() {
                             let txid = tx.txid();
                             mempool.remove(&txid);
@@ -566,6 +623,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                     }
                     Ok(Sequence::BlockDisconnected(block_hash)) => {
                         block_hashes.pop();
+                        blocks_bucket.remove();
                         warn!("block {} disconnected", block_hash);
                     }
                     Err(e) => warn!("cannot parse sequence {:?}", e),
@@ -586,7 +644,8 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
                     let only_mine: HashSet<_> =
                         my_mempool_set.difference(&raw_mempool_set).collect();
                     if !only_mine.is_empty() {
-                        warn!("only mine: {:?}", only_mine);
+                        warn!("only mine total tx: {:?}", only_mine.len());
+                        trace!("only mine tx: {:?}", only_mine);
                     }
                 }
                 EventType::InitialRawMempool => {
@@ -612,7 +671,7 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
         info!("{} blocks", block_found);
         info!("-----------------------")
     }
-    info!("counter_block_to_confirm {:?}", counter_block_to_confirm);
+    debug!("counter_block_to_confirm {:?}", counter_block_to_confirm);
     info!("count_input_not_confirmed {}", count_input_not_confirmed);
     info!("total {}", total_rows);
     Ok(())
