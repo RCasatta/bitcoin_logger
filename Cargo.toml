@@ -36,3 +36,7 @@ path = "src/bin/convert.rs"
 [lib]
 name = "bitcoin_logger"
 path = "src/lib.rs"
+
+# for flamegraph
+[profile.release]
+debug = true
