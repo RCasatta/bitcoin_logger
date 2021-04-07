@@ -1,6 +1,6 @@
 use crate::buckets::create_buckets_limits;
 use crate::store::Transactions;
-use bitcoin::{Block, Transaction, Txid};
+use bitcoin::{Block, BlockHash, Transaction, Txid};
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 
@@ -12,6 +12,7 @@ pub struct BlocksBuckets {
     buckets_limits: Vec<f64>,
     blocks_to_consider: usize,
     tx_map: HashMap<Txid, Transaction>,
+    block_txids: HashMap<BlockHash, Vec<Txid>>,
 }
 
 impl BlocksBuckets {
@@ -25,6 +26,7 @@ impl BlocksBuckets {
             buckets_limits,
             blocks_to_consider,
             tx_map: HashMap::new(),
+            block_txids: HashMap::new(),
         }
     }
 
@@ -33,15 +35,21 @@ impl BlocksBuckets {
     }
 
     pub fn add(&mut self, block: Block) {
+        let block_hash = block.block_hash();
         if self.full() {
             let removed_block = self.last_blocks.pop_back().unwrap();
-            for tx in removed_block.txdata.iter() {
-                self.tx_map.remove(&tx.txid());
+            let removed_block_hash = removed_block.block_hash();
+            for txid in self.block_txids.remove(&removed_block_hash).unwrap() {
+                self.tx_map.remove(&txid);
             }
         }
+        let mut block_txids = Vec::with_capacity(block.txdata.len());
         for tx in block.txdata.iter() {
-            self.tx_map.insert(tx.txid(), tx.clone());
+            let txid = tx.txid();
+            self.tx_map.insert(txid, tx.clone());
+            block_txids.push(txid);
         }
+        self.block_txids.insert(block_hash, block_txids);
         self.last_blocks.push_front(block);
 
         if self.full() {
