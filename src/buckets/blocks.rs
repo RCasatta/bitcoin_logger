@@ -1,16 +1,17 @@
 use crate::buckets::create_buckets_limits;
 use crate::store::Transactions;
-use bitcoin::Block;
+use bitcoin::{Block, Transaction, Txid};
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 
 #[derive(Debug)]
 pub struct BlocksBuckets {
-    last_blocks: VecDeque<Block>, //TODO may use (height, block) and check last 10
+    last_blocks: VecDeque<Block>,
     buckets: Option<String>,
     buckets_na: String,
     buckets_limits: Vec<f64>,
     blocks_to_consider: usize,
+    tx_map: HashMap<Txid, Transaction>,
 }
 
 impl BlocksBuckets {
@@ -23,6 +24,7 @@ impl BlocksBuckets {
             buckets_na: buckets_na.join(","),
             buckets_limits,
             blocks_to_consider,
+            tx_map: HashMap::new(),
         }
     }
 
@@ -32,17 +34,18 @@ impl BlocksBuckets {
 
     pub fn add(&mut self, block: Block) {
         if self.full() {
-            self.last_blocks.pop_back();
+            let removed_block = self.last_blocks.pop_back().unwrap();
+            for tx in removed_block.txdata.iter() {
+                self.tx_map.remove(&tx.txid());
+            }
+        }
+        for tx in block.txdata.iter() {
+            self.tx_map.insert(tx.txid(), tx.clone());
         }
         self.last_blocks.push_front(block);
+
         if self.full() {
-            let mut map = HashMap::new();
-            for b in self.last_blocks.iter() {
-                for tx in b.txdata.iter() {
-                    map.insert(tx.txid(), tx.clone());
-                }
-            }
-            let txs = Transactions::from_txs(map);
+            let txs = Transactions::from_txs(&self.tx_map);
             let rates = txs.fee_rates();
             let mut buckets = vec![0u64; self.buckets_limits.len()];
             for rate in rates {

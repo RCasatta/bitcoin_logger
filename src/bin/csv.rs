@@ -363,7 +363,8 @@ fn process(receiver: Receiver<Option<BitcoinLog>>, options: CsvOptions) -> crate
 
         let mut blocks_height: HashMap<_, _> =
             data.blocks_height.iter().map(|e| (e.0, e.1)).collect();
-        let txs = Transactions::new(data);
+        let mut txs_map = HashMap::new();
+        let txs = Transactions::new(&data, &mut txs_map);
 
         for (hash, block) in blocks.iter() {
             if blocks_height.get(hash).is_none() {

@@ -125,8 +125,8 @@ pub fn now() -> u64 {
         .as_millis() as u64
 }
 
-pub struct Transactions {
-    txs: HashMap<Txid, Transaction>,
+pub struct Transactions<'a> {
+    txs: &'a HashMap<Txid, Transaction>,
     txs_output_values: HashMap<Txid, OutputValues>,
     txs_height: HashMap<Txid, u32>,
 }
@@ -137,8 +137,8 @@ impl From<TxidOutputValues> for OutputValues {
     }
 }
 
-impl Transactions {
-    pub fn from_txs(txs: HashMap<Txid, Transaction>) -> Self {
+impl<'a> Transactions<'a> {
+    pub fn from_txs(txs: &'a HashMap<Txid, Transaction>) -> Self {
         let mut txs_output_values: HashMap<Txid, OutputValues> = HashMap::new();
         for (txid, tx) in txs.iter() {
             let output_values: Vec<_> = tx.output.iter().map(|e| e.value).collect();
@@ -151,8 +151,7 @@ impl Transactions {
         }
     }
 
-    pub fn new(data: Data) -> Self {
-        let mut txs = HashMap::new();
+    pub fn new(data: &Data, txs: &'a mut HashMap<Txid, Transaction>) -> Self {
         let txs_output_values: HashMap<_, _> = data
             .output_values
             .iter()
